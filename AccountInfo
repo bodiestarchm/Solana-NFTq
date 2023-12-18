@@ -1,0 +1,181 @@
+// Import necessary libraries
+use solana_program::{
+    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, msg, pubkey::Pubkey, program,
+    program_pack::Pack, system_instruction, sysvar,
+};
+use solana_program::instruction::AccountMeta;
+use solana_program::program::invoke_signed;
+use solana_program::program_pack::IsInitialized;
+
+// Define NFT data structure
+#[repr(C)]
+pub struct NFT {
+    pub initialized: bool,
+    pub mint: Pubkey, // Mint account
+    pub owner: Pubkey, // Owner account
+    pub total_supply: u64,
+}
+
+// Define TokenAccount data structure
+#[repr(C)]
+pub struct TokenAccount {
+    pub mint: Pubkey, // Associated mint
+    pub owner: Pubkey, // Account owner
+    pub amount: u64, // Token amount
+}
+
+// Define Mint data structure
+#[repr(C)]
+pub struct Mint {
+    pub initialized: bool,
+    pub mint_authority: Pubkey,
+    pub freeze_authority: Option<Pubkey>,
+    pub decimals: u8,
+}
+
+// Program entry point
+#[entrypoint]
+fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    // Parse account information
+    let accounts_iter = &mut accounts.iter();
+    let nft_account = next_account_info(accounts_iter)?;
+
+    // Check if the correct program owns the contract
+    if nft_account.owner != program_id {
+        return Err(solana_program::program_error::ProgramError::IncorrectProgramId);
+    }
+
+    // Parse NFT data
+    let mut nft_data = NFT::unpack(&nft_account.data.borrow())?;
+
+    // Handle different operations based on the instruction
+    match instruction_data[0] {
+        0 => {
+            // Operation: Initialize NFT
+            initialize_nft(accounts_iter, &mut nft_data, instruction_data)?;
+        }
+        1 => {
+            // Operation: Mint NFT
+            mint_nft(accounts_iter, &mut nft_data, instruction_data)?;
+        }
+        2 => {
+            // Operation: Transfer NFT
+            transfer_nft(accounts_iter, &nft_data, instruction_data)?;
+        }
+        _ => {
+            // Invalid operation
+            return Err(solana_program::program_error::ProgramError::InvalidInstructionData);
+        }
+    }
+
+    // Update NFT data
+    NFT::pack(nft_data, &mut nft_account.data.borrow_mut())?;
+
+    Ok(())
+}
+
+// Helper function: Initialize NFT
+fn initialize_nft<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    nft_data: &mut NFT,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    // Check if NFT is already initialized
+    if nft_data.initialized {
+        return Err(solana_program::program_error::ProgramError::AccountAlreadyInitialized);
+    }
+
+    // Parse instruction data for initialization
+    let mint_account = next_account_info(accounts_iter)?;
+    let owner_account = next_account_info(accounts_iter)?;
+
+    // Initialize NFT data
+    nft_data.initialized = true;
+    nft_data.mint = *mint_account.key;
+    nft_data.owner = *owner_account.key;
+
+    Ok(())
+}
+
+// Helper function: Mint NFT
+fn mint_nft<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    nft_data: &mut NFT,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    // Parse instruction data for minting
+    let recipient_account = next_account_info(accounts_iter)?;
+
+    // Mint new NFT
+    let mint_ix = spl_token::instruction::mint_to(
+        &spl_token::id(),
+        &nft_data.mint,
+        &recipient_account.key,
+        &nft_data.owner,
+        &[],
+        1, // Assuming each NFT has a supply of 1
+    )?;
+    invoke_signed(&mint_ix, accounts_iter, &[])?;
+
+    // Update total supply in NFT data
+    nft_data.total_supply += 1;
+
+    Ok(())
+}
+
+// Helper function: Transfer NFT
+fn transfer_nft<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    nft_data: &NFT,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    // Parse instruction data for transfer
+    let sender_account = next_account_info(accounts_iter)?;
+    let recipient_account = next_account_info(accounts_iter)?;
+
+    // Transfer NFT
+    let transfer_ix = spl_token::instruction::transfer(
+        &spl_token::id(),
+        &sender_account.key,
+        &recipient_account.key,
+        &nft_data.owner,
+        &[],
+        1, // Assuming each NFT has a supply of 1
+    )?;
+    invoke_signed(&transfer_ix, accounts_iter, &[])?;
+
+    Ok(())
+}
+
+// Helper function: Parse account information
+fn next_account_info<'a, 'b>(
+    iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+) -> Result<&'a AccountInfo<'b>, ProgramResult> {
+    iter.next().ok_or_else(|| solana_program::program_error::ProgramError::NotEnoughAccountKeys)
+}
+
+// Helper function: Pack NFT data into storage space
+impl Pack for NFT {
+    const LEN: usize = 41; // Increase for the additional bool field
+
+    fn unpack_from_slice(src: &[u8]) -> Result<Self, solana_program::program_error::ProgramError> {
+        let initialized = bool::from_le_bytes(src[0..1].try_into().unwrap());
+        let mint = Pubkey::new_from_array(<[u8; 32]>::try_from(&src[1..33]).unwrap());
+        let owner = Pubkey::new_from_array(<[u8; 32]>::try_from(&src[33..65]).unwrap());
+        let total_supply = u64::from_le_bytes(src[65..73].try_into().unwrap());
+
+        Ok(NFT {
+            initialized,
+            mint,
+            owner,
+            total_supply,
+        })
+    }
+
+    fn pack_into_slice(&self, dst: &mut [u8]) {
+        dst[0..1].copy_from_slice(&self.initialized.to_le_bytes());
+        dst[1..33].copy_from_slice(&self.mint.to_bytes());
+        dst[33..65].copy_from_slice(&self.owner.to_bytes());
+        dst[65..73].copy_from_slice(&self.total_supply.to_le_bytes());
+    }
+}
